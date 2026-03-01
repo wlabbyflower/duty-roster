@@ -1,0 +1,10 @@
+services:
+  duty-roster:
+    build:
+      context: ./backend
+    container_name: duty-roster
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/app/data
