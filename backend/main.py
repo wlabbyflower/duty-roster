@@ -417,13 +417,15 @@ def summarize_slot_status(slots: set[str]) -> str:
     if s in ({"morning"},):
         return "上午在"
     if s in ({"afternoon"},):
-        return "下午来"
+        return "下午在"
     if s in ({"evening"},):
-        return "晚上来"
-    if s in ({"morning", "afternoon"}, {"morning", "afternoon", "evening"}):
-        return "全天都在"
+        return "晚上在"
+    if s == {"morning", "afternoon"}:
+        return "白天在"
     if s == {"afternoon", "evening"}:
-        return "下午到晚上在"
+        return "下午来晚上也在"
+    if s == {"morning", "afternoon", "evening"}:
+        return "全天都在"
     if s == {"morning", "evening"}:
         return "上午和晚上在"
     return "值班中"
@@ -597,6 +599,15 @@ def parse_excel_schedule(content: bytes, tz_name: str) -> dict[str, Any]:
                     after_roster.add(person_name)
                     work_map = bucket["after_work"]
                     work_map.setdefault(person_name, set()).add(slot)
+
+                # "推特私信*" 这类值也算在班，按该人员已识别的角色归类到对应班次。
+                if "推特私信" in role_text:
+                    if person_name in pre_roster:
+                        work_map = bucket["pre_work"]
+                        work_map.setdefault(person_name, set()).add(slot)
+                    if person_name in after_roster:
+                        work_map = bucket["after_work"]
+                        work_map.setdefault(person_name, set()).add(slot)
 
     rows_result = []
     for d, values in date_map.items():
