@@ -112,6 +112,14 @@ def append_unique(items: list[str], value: str) -> None:
         items.append(v)
 
 
+def is_pre_sales_assignment(role_text: str) -> bool:
+    return "售前" in role_text or "推特私信" in role_text
+
+
+def is_after_sales_assignment(role_text: str) -> bool:
+    return "售后" in role_text
+
+
 def normalize_detail_items(raw_items: Any) -> list[dict[str, str]]:
     if not isinstance(raw_items, list):
         return []
@@ -590,24 +598,15 @@ def parse_excel_schedule(content: bytes, tz_name: str) -> dict[str, Any]:
                 if "休息" in role_text:
                     bucket["rest"].add(person_name)
 
-                if "售前" in role_text:
+                if is_pre_sales_assignment(role_text):
                     pre_roster.add(person_name)
                     work_map = bucket["pre_work"]
                     work_map.setdefault(person_name, set()).add(slot)
 
-                if "售后" in role_text:
+                if is_after_sales_assignment(role_text):
                     after_roster.add(person_name)
                     work_map = bucket["after_work"]
                     work_map.setdefault(person_name, set()).add(slot)
-
-                # "推特私信*" 这类值也算在班，按该人员已识别的角色归类到对应班次。
-                if "推特私信" in role_text:
-                    if person_name in pre_roster:
-                        work_map = bucket["pre_work"]
-                        work_map.setdefault(person_name, set()).add(slot)
-                    if person_name in after_roster:
-                        work_map = bucket["after_work"]
-                        work_map.setdefault(person_name, set()).add(slot)
 
     rows_result = []
     for d, values in date_map.items():
