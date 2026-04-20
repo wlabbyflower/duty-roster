@@ -1,5 +1,6 @@
 const el = {
   todayDate: document.getElementById("todayDate"),
+  todayBadge: document.getElementById("todayBadge"),
   preSales: document.getElementById("preSales"),
   afterSales: document.getElementById("afterSales"),
   openSettingsBtn: document.getElementById("openSettingsBtn"),
@@ -8,10 +9,13 @@ const el = {
   scheduleTableBody: document.getElementById("scheduleTableBody"),
   weeklyTableBody: document.getElementById("weeklyTableBody"),
   excelFile: document.getElementById("excelFile"),
+  holidayExcelFile: document.getElementById("holidayExcelFile"),
   importExcelBtn: document.getElementById("importExcelBtn"),
+  importHolidayExcelBtn: document.getElementById("importHolidayExcelBtn"),
   addRowBtn: document.getElementById("addRowBtn"),
   saveScheduleBtn: document.getElementById("saveScheduleBtn"),
   exportExcelBtn: document.getElementById("exportExcelBtn"),
+  holidayTableBody: document.getElementById("holidayTableBody"),
   webhookInput: document.getElementById("webhookInput"),
   notifyTimeInput: document.getElementById("notifyTimeInput"),
   notifyCountInput: document.getElementById("notifyCountInput"),
@@ -51,9 +55,21 @@ function renderToday(today, timezone) {
   el.todayDate.textContent = `${now} (${timezone || "Asia/Shanghai"})`;
 
   if (!today) {
+    el.todayBadge.classList.add("hidden");
     el.preSales.textContent = "未安排";
     el.afterSales.textContent = "未安排";
     return;
+  }
+
+  if (today.source === "holiday") {
+    const name = today.holiday_name ? ` · ${today.holiday_name}` : "";
+    el.todayBadge.textContent = `节假日值班${name}`;
+    el.todayBadge.classList.remove("hidden");
+    el.todayBadge.classList.add("holiday");
+  } else {
+    el.todayBadge.textContent = today.source === "weekday" ? "按周模板" : "普通值班";
+    el.todayBadge.classList.remove("hidden");
+    el.todayBadge.classList.remove("holiday");
   }
 
   el.preSales.textContent = today.pre_sales || "未安排";
@@ -113,6 +129,28 @@ function renderWeeklyTemplates(templates) {
   });
 }
 
+function renderHolidayPeriods(periods) {
+  el.holidayTableBody.innerHTML = "";
+  if (!periods.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td colspan='5'>暂无节假日排班</td>";
+    el.holidayTableBody.appendChild(tr);
+    return;
+  }
+
+  periods.forEach((item) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${item.name || "--"}</td>
+      <td>${item.start_date || "--"}</td>
+      <td>${item.end_date || "--"}</td>
+      <td>${item.pre_sales || "--"}</td>
+      <td>${item.after_sales || "--"}</td>
+    `;
+    el.holidayTableBody.appendChild(tr);
+  });
+}
+
 function collectScheduleRows() {
   const rows = [];
   const trList = Array.from(el.scheduleTableBody.querySelectorAll("tr"));
@@ -162,6 +200,7 @@ async function loadSettingsPage() {
   const [scheduleData, settingsData] = await Promise.all([api("/api/schedule"), api("/api/settings")]);
   renderSchedule(scheduleData.rows || []);
   renderWeeklyTemplates(scheduleData.weekly_templates || []);
+  renderHolidayPeriods(scheduleData.holiday_periods || []);
   fillSettings(settingsData || {});
 }
 
@@ -217,6 +256,26 @@ el.importExcelBtn.addEventListener("click", async () => {
     showToast(`导入成功：按日期 ${result.count ?? 0} 条，按周模板 ${result.weekly_count ?? 0} 条`);
   } catch (err) {
     showToast(err.message || "导入失败");
+  }
+});
+
+el.importHolidayExcelBtn.addEventListener("click", async () => {
+  const file = el.holidayExcelFile.files?.[0];
+  if (!file) {
+    showToast("请先选择节假日 Excel 文件");
+    return;
+  }
+
+  const form = new FormData();
+  form.append("file", file);
+
+  try {
+    const result = await api("/api/import-holiday-excel", { method: "POST", body: form });
+    await loadSettingsPage();
+    await loadToday();
+    showToast(`节假日排班导入成功：${result.count ?? 0} 条`);
+  } catch (err) {
+    showToast(err.message || "节假日排班导入失败");
   }
 });
 

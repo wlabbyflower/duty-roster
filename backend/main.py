@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import requests
@@ -39,6 +40,15 @@ TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 SHEET_MONTH_RE = re.compile(r"^(\d{1,2})月$")
 DAY_ONLY_RE = re.compile(r"(\d{1,2})\s*(日|号)?$")
 MONTH_DAY_RE = re.compile(r"(\d{1,2})\s*[./月-]\s*(\d{1,2})")
+FULL_DATE_RANGE_RE = re.compile(
+    r"(?:(\d{4})\s*[年./-])?\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*(?:日|号)?\s*(?:到|至|[-~～—–])\s*"
+    r"(?:(\d{4})\s*[年./-])?\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*(?:日|号)?"
+)
+SAME_MONTH_DATE_RANGE_RE = re.compile(
+    r"(?:(\d{4})\s*[年./-])?\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*(?:日|号)?\s*(?:到|至|[-~～—–])\s*(\d{1,2})\s*(?:日|号)?"
+)
+
+HOLIDAY_NAME_KEYWORDS = ("节", "假", "春节", "清明", "劳动", "端午", "中秋", "国庆", "元旦")
 
 WEEKDAY_MAP = {
     "周一": 1,
@@ -82,6 +92,15 @@ class SaveSettingsPayload(BaseModel):
     timezone: str = "Asia/Shanghai"
 
 
+class HolidayPeriodRow(BaseModel):
+    id: str = ""
+    name: str = ""
+    start_date: str
+    end_date: str
+    pre_sales: str = Field(default="")
+    after_sales: str = Field(default="")
+
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -95,6 +114,7 @@ def default_schedule_data() -> dict[str, Any]:
     return {
         "rows": [],
         "weekly_templates": [],
+        "holiday_periods": [],
     }
 
 
@@ -135,6 +155,13 @@ def normalize_detail_items(raw_items: Any) -> list[dict[str, str]]:
             status = "值班中"
         result.append({"name": name, "status": status})
     return result
+
+
+def normalize_iso_date_string(value: Any) -> str | None:
+    d = normalize_date_value(value)
+    if not d:
+        return None
+    return d.isoformat()
 
 
 def normalize_date_value(value: Any) -> date | None:
@@ -253,6 +280,50 @@ def normalize_weekly_templates(raw_templates: list[Any]) -> list[dict[str, Any]]
     return result
 
 
+def normalize_holiday_periods(raw_periods: list[Any]) -> list[dict[str, Any]]:
+    periods: list[dict[str, Any]] = []
+    for item in raw_periods:
+        if not isinstance(item, dict):
+            continue
+
+        start_date = normalize_iso_date_string(item.get("start_date"))
+        end_date = normalize_iso_date_string(item.get("end_date"))
+        if not start_date or not end_date:
+            continue
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
+
+        periods.append(
+            {
+                "id": str(item.get("id") or uuid4()),
+                "name": str(item.get("name") or "").strip(),
+                "start_date": start_date,
+                "end_date": end_date,
+                "range_start_date": normalize_iso_date_string(item.get("range_start_date")) or start_date,
+                "range_end_date": normalize_iso_date_string(item.get("range_end_date")) or end_date,
+                "pre_sales": str(item.get("pre_sales") or "").strip(),
+                "after_sales": str(item.get("after_sales") or "").strip(),
+                "pre_details": normalize_detail_items(item.get("pre_details")),
+                "after_details": normalize_detail_items(item.get("after_details")),
+            }
+        )
+
+    unique: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for period in periods:
+        key = (
+            period["start_date"],
+            period["end_date"],
+            period["name"],
+            period["range_start_date"],
+            period["range_end_date"],
+        )
+        unique[key] = period
+
+    result = list(unique.values())
+    result.sort(key=lambda x: (x["start_date"], x["end_date"], x["name"]))
+    return result
+
+
 def load_schedule_data() -> dict[str, Any]:
     with lock:
         if not SCHEDULE_FILE.exists():
@@ -264,7 +335,7 @@ def load_schedule_data() -> dict[str, Any]:
 
         if isinstance(raw, list):
             rows = normalize_schedule_rows(raw)
-            data = {"rows": rows, "weekly_templates": []}
+            data = {"rows": rows, "weekly_templates": [], "holiday_periods": []}
             _atomic_write(SCHEDULE_FILE, data)
             return data
 
@@ -275,7 +346,8 @@ def load_schedule_data() -> dict[str, Any]:
 
         rows = normalize_schedule_rows(raw.get("rows") or [])
         weekly_templates = normalize_weekly_templates(raw.get("weekly_templates") or [])
-        data = {"rows": rows, "weekly_templates": weekly_templates}
+        holiday_periods = normalize_holiday_periods(raw.get("holiday_periods") or [])
+        data = {"rows": rows, "weekly_templates": weekly_templates, "holiday_periods": holiday_periods}
         return data
 
 
@@ -294,6 +366,12 @@ def save_schedule_rows(rows: list[dict[str, str]]) -> None:
     save_schedule_data(data)
 
 
+def save_holiday_periods(periods: list[dict[str, Any]]) -> None:
+    data = load_schedule_data()
+    data["holiday_periods"] = normalize_holiday_periods(periods)
+    save_schedule_data(data)
+
+
 def parse_schedule_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     normalized: list[dict[str, Any]] = []
     for row in rows:
@@ -309,6 +387,42 @@ def parse_schedule_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     by_date: dict[str, dict[str, str]] = {r["date"]: r for r in normalized}
     result = list(by_date.values())
     result.sort(key=lambda x: x["date"])
+    return result
+
+
+def parse_holiday_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        start_date = normalize_iso_date_string(row.get("start_date"))
+        end_date = normalize_iso_date_string(row.get("end_date"))
+        if not start_date or not end_date:
+            continue
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
+
+        pre_sales = str(row.get("pre_sales") or "").strip()
+        after_sales = str(row.get("after_sales") or "").strip()
+        if not pre_sales and not after_sales:
+            continue
+
+        normalized.append(
+            {
+                "id": str(row.get("id") or uuid4()),
+                "name": str(row.get("name") or "").strip(),
+                "start_date": start_date,
+                "end_date": end_date,
+                "range_start_date": normalize_iso_date_string(row.get("range_start_date")) or start_date,
+                "range_end_date": normalize_iso_date_string(row.get("range_end_date")) or end_date,
+                "pre_sales": pre_sales,
+                "after_sales": after_sales,
+            }
+        )
+
+    unique: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for row in normalized:
+        unique[(row["start_date"], row["end_date"], row["name"], row["range_start_date"], row["range_end_date"])] = row
+    result = list(unique.values())
+    result.sort(key=lambda x: (x["start_date"], x["end_date"], x["name"]))
     return result
 
 
@@ -399,6 +513,14 @@ def parse_time_slot(value: Any) -> str:
     return "evening"
 
 
+def excel_serial_to_date(serial: float) -> date | None:
+    try:
+        epoch = datetime(1899, 12, 30)
+        return (epoch + timedelta(days=float(serial))).date()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def sort_people_by_order(candidates: list[str], person_order: list[str]) -> list[str]:
     seen = set()
     ordered: list[str] = []
@@ -411,6 +533,109 @@ def sort_people_by_order(candidates: list[str], person_order: list[str]) -> list
             ordered.append(name)
             seen.add(name)
     return ordered
+
+
+def collect_sheet_strings(rows: list[list[Any]], limit: int = 8) -> str:
+    parts: list[str] = []
+    for row in rows[:limit]:
+        for cell in row:
+            text = normalize_text(cell)
+            if text:
+                parts.append(text)
+    return " ".join(parts)
+
+
+def infer_year_for_holiday_range(start_month: int, end_month: int, today: date) -> int:
+    candidate_month = start_month if start_month >= today.month else end_month
+    return infer_year_for_month(candidate_month, today)
+
+
+def parse_holiday_range_text(text: str, today: date) -> tuple[str, str] | None:
+    s = normalize_text(text).replace("～", "~").replace("—", "-").replace("–", "-")
+    if not s:
+        return None
+
+    match = FULL_DATE_RANGE_RE.search(s)
+    if match:
+        start_year = int(match.group(1)) if match.group(1) else None
+        start_month = int(match.group(2))
+        start_day = int(match.group(3))
+        end_year = int(match.group(4)) if match.group(4) else None
+        end_month = int(match.group(5))
+        end_day = int(match.group(6))
+        year = start_year or end_year or infer_year_for_holiday_range(start_month, end_month, today)
+        try:
+            start = date(start_year or year, start_month, start_day)
+            end = date(end_year or year, end_month, end_day)
+            return (start.isoformat(), end.isoformat()) if start <= end else (end.isoformat(), start.isoformat())
+        except ValueError:
+            return None
+
+    match = SAME_MONTH_DATE_RANGE_RE.search(s)
+    if match:
+        explicit_year = int(match.group(1)) if match.group(1) else None
+        month = int(match.group(2))
+        start_day = int(match.group(3))
+        end_day = int(match.group(4))
+        year = explicit_year or infer_year_for_month(month, today)
+        try:
+            start = date(year, month, start_day)
+            end = date(year, month, end_day)
+            return (start.isoformat(), end.isoformat()) if start <= end else (end.isoformat(), start.isoformat())
+        except ValueError:
+            return None
+
+    return None
+
+
+def detect_holiday_title(rows: list[list[Any]]) -> str:
+    for row in rows[:6]:
+        for cell in row:
+            text = normalize_text(cell)
+            if not text:
+                continue
+            if any(keyword in text for keyword in HOLIDAY_NAME_KEYWORDS):
+                return text
+    return ""
+
+
+def detect_holiday_date_range(rows: list[list[Any]], today: date) -> tuple[str, str] | None:
+    for row in rows[:8]:
+        for cell in row:
+            text = normalize_text(cell)
+            if not text:
+                continue
+            parsed = parse_holiday_range_text(text, today)
+            if parsed:
+                return parsed
+    return None
+
+
+def parse_holiday_name_from_range_text(rows: list[list[Any]], fallback: str) -> str:
+    title = detect_holiday_title(rows)
+    if title:
+        return title
+    return fallback or "节假日值班"
+
+
+def date_range_iter(start_iso: str, end_iso: str):
+    start = datetime.strptime(start_iso, "%Y-%m-%d").date()
+    end = datetime.strptime(end_iso, "%Y-%m-%d").date()
+    current = start
+    while current <= end:
+        yield current
+        current += timedelta(days=1)
+
+
+def save_single_sheet_to_bytes(ws) -> bytes:
+    wb = Workbook()
+    target = wb.active
+    target.title = ws.title
+    for row in ws.iter_rows(values_only=True):
+        target.append(list(row))
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
 
 
 def summarize_slot_status(slots: set[str]) -> str:
@@ -647,9 +872,99 @@ def parse_excel_schedule(content: bytes, tz_name: str) -> dict[str, Any]:
     }
 
 
+def parse_holiday_excel_schedule(content: bytes, tz_name: str) -> dict[str, Any]:
+    wb = load_workbook(filename=BytesIO(content), data_only=True)
+    today = datetime.now(ZoneInfo(tz_name)).date()
+
+    periods: list[dict[str, Any]] = []
+    for ws in wb.worksheets:
+        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+        if not rows:
+            continue
+
+        date_range = detect_holiday_date_range(rows, today)
+        if not date_range:
+            continue
+
+        parsed = parse_excel_schedule(content=save_single_sheet_to_bytes(ws), tz_name=tz_name)
+        period_name = parse_holiday_name_from_range_text(rows, ws.title.strip())
+
+        if parsed.get("rows"):
+            exact_rows = parsed["rows"]
+            range_start_date, range_end_date = date_range
+            for row in exact_rows:
+                periods.append(
+                    {
+                        "name": period_name,
+                        "start_date": row["date"],
+                        "end_date": row["date"],
+                        "range_start_date": range_start_date,
+                        "range_end_date": range_end_date,
+                        "pre_sales": row.get("pre_sales", ""),
+                        "after_sales": row.get("after_sales", ""),
+                        "pre_details": normalize_detail_items(row.get("pre_details")),
+                        "after_details": normalize_detail_items(row.get("after_details")),
+                    }
+                )
+        else:
+            start_date, end_date = date_range
+            templates = parsed.get("weekly_templates") or []
+            if not templates:
+                raise HTTPException(status_code=400, detail="节假日 Excel 已识别到日期区间，但未识别到排班内容")
+            for current in date_range_iter(start_date, end_date):
+                weekday = current.isoweekday()
+                matched = next((tpl for tpl in templates if int(tpl.get("weekday") or 0) == weekday), None)
+                if not matched:
+                    continue
+                periods.append(
+                    {
+                        "name": period_name,
+                        "start_date": current.isoformat(),
+                        "end_date": current.isoformat(),
+                        "range_start_date": start_date,
+                        "range_end_date": end_date,
+                        "pre_sales": matched.get("pre_sales", ""),
+                        "after_sales": matched.get("after_sales", ""),
+                        "pre_details": normalize_detail_items(matched.get("pre_details")),
+                        "after_details": normalize_detail_items(matched.get("after_details")),
+                    }
+                )
+
+    periods = normalize_holiday_periods(periods)
+    if not periods:
+        raise HTTPException(status_code=400, detail="未识别到节假日值班数据，请确认表格顶部包含起止日期")
+    return {"holiday_periods": periods}
+
+
 def get_today_entry(schedule_data: dict[str, Any], tz_name: str) -> dict[str, Any] | None:
     now = datetime.now(ZoneInfo(tz_name))
     today_iso = now.date().isoformat()
+
+    holiday_matches = [
+        period
+        for period in schedule_data.get("holiday_periods") or []
+        if str(period.get("start_date") or "") <= today_iso <= str(period.get("end_date") or "")
+    ]
+    holiday_matches.sort(
+        key=lambda item: (
+            item.get("start_date") != item.get("end_date"),
+            item.get("start_date", ""),
+            item.get("end_date", ""),
+        )
+    )
+    if holiday_matches:
+        period = holiday_matches[0]
+        return {
+            "date": today_iso,
+            "pre_sales": period.get("pre_sales", ""),
+            "after_sales": period.get("after_sales", ""),
+            "pre_details": normalize_detail_items(period.get("pre_details")),
+            "after_details": normalize_detail_items(period.get("after_details")),
+            "source": "holiday",
+            "holiday_name": period.get("name", ""),
+            "holiday_start_date": period.get("range_start_date", period.get("start_date", "")),
+            "holiday_end_date": period.get("range_end_date", period.get("end_date", "")),
+        }
 
     for row in schedule_data.get("rows") or []:
         if row.get("date") == today_iso:
@@ -699,10 +1014,17 @@ def send_wecom_notification(test_mode: bool = False) -> dict[str, Any]:
         pre_details = normalize_detail_items(today_entry.get("pre_details"))
         after_details = normalize_detail_items(today_entry.get("after_details"))
 
-        lines = [
-            "值班提醒",
-            f"日期：{today_entry['date']}",
-        ]
+        is_holiday = today_entry.get("source") == "holiday"
+        title = "节假日值班提醒" if is_holiday else "值班提醒"
+        lines = [title, f"日期：{today_entry['date']}"]
+        if is_holiday:
+            holiday_name = str(today_entry.get("holiday_name") or "").strip()
+            holiday_start = str(today_entry.get("holiday_start_date") or "")
+            holiday_end = str(today_entry.get("holiday_end_date") or "")
+            if holiday_name:
+                lines.append(f"节假日：{holiday_name}")
+            if holiday_start and holiday_end:
+                lines.append(f"区间：{holiday_start} 至 {holiday_end}")
         lines.extend(role_lines("售前", today_entry.get("pre_sales", ""), pre_details))
         lines.extend(role_lines("售后", today_entry.get("after_sales", ""), after_details))
         content = "\n".join(lines)
@@ -788,6 +1110,7 @@ def api_schedule() -> dict[str, Any]:
     return {
         "rows": data["rows"],
         "weekly_templates": data.get("weekly_templates") or [],
+        "holiday_periods": data.get("holiday_periods") or [],
     }
 
 
@@ -819,11 +1142,32 @@ async def api_import_excel(file: UploadFile = File(...)) -> dict[str, Any]:
     }
 
 
+@app.post("/api/import-holiday-excel")
+async def api_import_holiday_excel(file: UploadFile = File(...)) -> dict[str, Any]:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="未选择文件")
+
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式")
+
+    content = await file.read()
+    settings = load_settings()
+    tz_name = settings.get("timezone") or DEFAULT_SETTINGS["timezone"]
+    parsed = parse_holiday_excel_schedule(content, tz_name)
+    save_holiday_periods(parsed["holiday_periods"])
+    return {
+        "ok": True,
+        "count": len(parsed["holiday_periods"]),
+    }
+
+
 @app.get("/api/export-excel")
 def api_export_excel() -> StreamingResponse:
     data = load_schedule_data()
     rows = data["rows"]
     weekly = data.get("weekly_templates") or []
+    holiday_periods = data.get("holiday_periods") or []
 
     wb = Workbook()
     ws = wb.active
@@ -838,6 +1182,19 @@ def api_export_excel() -> StreamingResponse:
     for tpl in weekly:
         w = int(tpl.get("weekday") or 0)
         ws2.append([weekday_name.get(w, w), tpl.get("pre_sales", ""), tpl.get("after_sales", "")])
+
+    ws3 = wb.create_sheet("节假日值班")
+    ws3.append(["名称", "开始日期", "结束日期", "售前", "售后"])
+    for item in holiday_periods:
+        ws3.append(
+            [
+                item.get("name", ""),
+                item.get("start_date", ""),
+                item.get("end_date", ""),
+                item.get("pre_sales", ""),
+                item.get("after_sales", ""),
+            ]
+        )
 
     bio = BytesIO()
     wb.save(bio)

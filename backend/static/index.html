@@ -14,6 +14,7 @@
           <p class="tag">DUTY ROSTER</p>
           <h1>今日值班</h1>
           <p id="todayDate" class="muted">加载中...</p>
+          <p id="todayBadge" class="today-badge hidden">普通值班</p>
         </div>
         <button id="openSettingsBtn" class="icon-btn" aria-label="打开设置">⚙</button>
       </header>
@@ -41,7 +42,11 @@
         <h4>1. Excel 导入 / 排班编辑</h4>
         <div class="row">
           <input id="excelFile" type="file" accept=".xlsx" />
-          <button id="importExcelBtn" class="btn">导入</button>
+          <button id="importExcelBtn" class="btn">导入日常排班</button>
+        </div>
+        <div class="row">
+          <input id="holidayExcelFile" type="file" accept=".xlsx" />
+          <button id="importHolidayExcelBtn" class="btn warn">导入节假日排班</button>
         </div>
         <div class="row">
           <button id="addRowBtn" class="btn ghost">新增一行</button>
@@ -72,6 +77,21 @@
               </tr>
             </thead>
             <tbody id="weeklyTableBody"></tbody>
+          </table>
+        </div>
+        <h4 style="margin-top: 12px">节假日值班</h4>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>开始日期</th>
+                <th>结束日期</th>
+                <th>售前</th>
+                <th>售后</th>
+              </tr>
+            </thead>
+            <tbody id="holidayTableBody"></tbody>
           </table>
         </div>
       </section>

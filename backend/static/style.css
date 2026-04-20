@@ -68,6 +68,28 @@ h1 {
   margin: 0;
 }
 
+.today-badge {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(33, 195, 255, 0.45);
+  background: rgba(17, 79, 122, 0.35);
+  color: #c7efff;
+  font-size: 12px;
+  letter-spacing: 0.4px;
+}
+
+.today-badge.holiday {
+  border-color: rgba(255, 183, 76, 0.55);
+  background: rgba(135, 72, 12, 0.32);
+  color: #ffd9a2;
+}
+
+.hidden {
+  display: none;
+}
+
 .duty-grid {
   margin-top: 14px;
   display: grid;
@@ -192,6 +214,10 @@ textarea {
 .btn {
   cursor: pointer;
   background: linear-gradient(125deg, #0b76c9, #2052bc);
+}
+
+.btn.warn {
+  background: linear-gradient(125deg, #d27218, #9f4a12);
 }
 
 .btn.ghost {
