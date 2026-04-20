@@ -47,6 +47,10 @@ FULL_DATE_RANGE_RE = re.compile(
 SAME_MONTH_DATE_RANGE_RE = re.compile(
     r"(?:(\d{4})\s*[年./-])?\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*(?:日|号)?\s*(?:到|至|[-~～—–])\s*(\d{1,2})\s*(?:日|号)?"
 )
+COMPACT_MONTH_RANGE_RE = re.compile(
+    r"(?:(\d{4})\s*[年./-])?\s*(\d{1,2})\s*[./月-]\s*(\d{1,2})\s*(?:日|号)?\s*(?:到|至|[-~～—–])\s*(\d{1,2})\s*(?:日|号)?"
+)
+HEADER_MONTH_RANGE_RE = re.compile(r"(\d{1,2})\s*[./月-]\s*(\d{1,2})")
 
 HOLIDAY_NAME_KEYWORDS = ("节", "假", "春节", "清明", "劳动", "端午", "中秋", "国庆", "元旦")
 
@@ -459,7 +463,12 @@ def parse_weekday(value: Any) -> int | None:
     return WEEKDAY_MAP.get(s)
 
 
-def parse_day_descriptor(value: Any, sheet_month: int | None, today: date) -> tuple[str, Any] | None:
+def parse_day_descriptor(
+    value: Any,
+    sheet_month: int | None,
+    today: date,
+    default_year: int | None = None,
+) -> tuple[str, Any] | None:
     weekday = parse_weekday(value)
     if weekday:
         return ("weekday", weekday)
@@ -477,7 +486,7 @@ def parse_day_descriptor(value: Any, sheet_month: int | None, today: date) -> tu
         month = int(m.group(1))
         day_num = int(m.group(2))
         if 1 <= month <= 12 and 1 <= day_num <= 31:
-            year = infer_year_for_month(month, today)
+            year = default_year or infer_year_for_month(month, today)
             try:
                 d = date(year, month, day_num)
                 return ("date", d.isoformat())
@@ -488,7 +497,7 @@ def parse_day_descriptor(value: Any, sheet_month: int | None, today: date) -> tu
     if m2 and sheet_month:
         day_num = int(m2.group(1))
         if 1 <= day_num <= 31:
-            year = infer_year_for_month(sheet_month, today)
+            year = default_year or infer_year_for_month(sheet_month, today)
             try:
                 d = date(year, sheet_month, day_num)
                 return ("date", d.isoformat())
@@ -585,6 +594,20 @@ def parse_holiday_range_text(text: str, today: date) -> tuple[str, str] | None:
         except ValueError:
             return None
 
+    match = COMPACT_MONTH_RANGE_RE.search(s)
+    if match:
+        explicit_year = int(match.group(1)) if match.group(1) else None
+        month = int(match.group(2))
+        start_day = int(match.group(3))
+        end_day = int(match.group(4))
+        year = explicit_year or infer_year_for_month(month, today)
+        try:
+            start = date(year, month, start_day)
+            end = date(year, month, end_day)
+            return (start.isoformat(), end.isoformat()) if start <= end else (end.isoformat(), start.isoformat())
+        except ValueError:
+            return None
+
     return None
 
 
@@ -615,6 +638,11 @@ def parse_holiday_name_from_range_text(rows: list[list[Any]], fallback: str) -> 
     title = detect_holiday_title(rows)
     if title:
         return title
+    for row in rows[:4]:
+        for cell in row:
+            text = normalize_text(cell)
+            if text:
+                return text
     return fallback or "节假日值班"
 
 
@@ -636,6 +664,28 @@ def save_single_sheet_to_bytes(ws) -> bytes:
     bio = BytesIO()
     wb.save(bio)
     return bio.getvalue()
+
+
+def build_holiday_sheet_context(rows: list[list[Any]], today: date) -> tuple[int | None, int | None]:
+    date_range = detect_holiday_date_range(rows, today)
+    if date_range:
+        start_date = datetime.strptime(date_range[0], "%Y-%m-%d").date()
+        return start_date.month, start_date.year
+
+    for row in rows[:6]:
+        for cell in row:
+            text = normalize_text(cell)
+            if not text:
+                continue
+            match = HEADER_MONTH_RANGE_RE.search(text)
+            if not match:
+                continue
+            month = int(match.group(1))
+            year = infer_year_for_month(month, today)
+            if 1 <= month <= 12:
+                return month, year
+
+    return None, None
 
 
 def summarize_slot_status(slots: set[str]) -> str:
@@ -742,7 +792,12 @@ def detect_header_row(rows: list[list[Any]]) -> tuple[int, int, int, list[tuple[
     return None
 
 
-def parse_excel_schedule(content: bytes, tz_name: str) -> dict[str, Any]:
+def parse_excel_schedule(
+    content: bytes,
+    tz_name: str,
+    sheet_month_override: int | None = None,
+    default_year: int | None = None,
+) -> dict[str, Any]:
     wb = load_workbook(filename=BytesIO(content), data_only=True)
     today = datetime.now(ZoneInfo(tz_name)).date()
 
@@ -762,7 +817,7 @@ def parse_excel_schedule(content: bytes, tz_name: str) -> dict[str, Any]:
             continue
 
         header_idx, date_col, time_col, person_cols = header
-        sheet_month = parse_sheet_month(ws.title)
+        sheet_month = sheet_month_override or parse_sheet_month(ws.title)
         current_day_marker: Any = None
         for _, person_name in person_cols:
             append_unique(person_order, person_name)
@@ -774,7 +829,7 @@ def parse_excel_schedule(content: bytes, tz_name: str) -> dict[str, Any]:
             if current_day_marker is None:
                 continue
 
-            descriptor = parse_day_descriptor(current_day_marker, sheet_month, today)
+            descriptor = parse_day_descriptor(current_day_marker, sheet_month, today, default_year=default_year)
             if not descriptor:
                 continue
 
@@ -886,7 +941,13 @@ def parse_holiday_excel_schedule(content: bytes, tz_name: str) -> dict[str, Any]
         if not date_range:
             continue
 
-        parsed = parse_excel_schedule(content=save_single_sheet_to_bytes(ws), tz_name=tz_name)
+        sheet_month, default_year = build_holiday_sheet_context(rows, today)
+        parsed = parse_excel_schedule(
+            content=save_single_sheet_to_bytes(ws),
+            tz_name=tz_name,
+            sheet_month_override=sheet_month,
+            default_year=default_year,
+        )
         period_name = parse_holiday_name_from_range_text(rows, ws.title.strip())
 
         if parsed.get("rows"):
