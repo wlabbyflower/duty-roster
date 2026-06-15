@@ -507,19 +507,67 @@ def parse_day_descriptor(
     return None
 
 
-def parse_time_slot(value: Any) -> str:
-    s = str(value or "").strip().replace("：", ":")
-    if not s:
-        return "unknown"
-    m = re.search(r"(\d{1,2})\s*:\s*\d{1,2}", s)
-    if not m:
-        return "unknown"
-    hour = int(m.group(1))
+def parse_time_token(hour_text: str, minute_text: str | None = None) -> int | None:
+    try:
+        hour = int(hour_text)
+        minute = int(minute_text or 0)
+    except ValueError:
+        return None
+
+    if hour == 24 and minute == 0:
+        return 24 * 60
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def classify_time_start(start_minute: int) -> str:
+    hour = start_minute // 60
     if hour < 12:
         return "morning"
-    if hour < 18:
+    if hour < 16:
         return "afternoon"
     return "evening"
+
+
+def parse_time_slots(value: Any) -> set[str]:
+    s = str(value or "").strip().replace("：", ":")
+    if not s:
+        return {"unknown"}
+
+    normalized = (
+        s.replace("～", "-")
+        .replace("—", "-")
+        .replace("–", "-")
+        .replace("至", "-")
+        .replace("到", "-")
+    )
+    matches = list(re.finditer(r"(\d{1,2})(?:\s*(?::|点)\s*(\d{1,2})?)?", normalized))
+    times = [parse_time_token(m.group(1), m.group(2)) for m in matches[:2]]
+    times = [t for t in times if t is not None]
+
+    if not times:
+        return {"unknown"}
+    if len(times) == 1:
+        return {classify_time_start(times[0])}
+
+    start, end = times[0], times[1]
+    if end <= start:
+        return {classify_time_start(start)}
+
+    if start < 13 * 60:
+        if end <= 13 * 60:
+            return {"morning"}
+        if end <= 18 * 60:
+            return {"morning", "afternoon"}
+        return {"morning", "afternoon", "evening"}
+
+    if start < 16 * 60:
+        if end <= 18 * 60:
+            return {"afternoon"}
+        return {"afternoon", "evening"}
+
+    return {"evening"}
 
 
 def excel_serial_to_date(serial: float) -> date | None:
@@ -695,7 +743,7 @@ def summarize_slot_status(slots: set[str]) -> str:
     if "unknown" in s:
         s.discard("unknown")
         if not s:
-            return "全天都在"
+            return "全天在"
 
     if s in ({"morning"},):
         return "上午在"
@@ -706,9 +754,9 @@ def summarize_slot_status(slots: set[str]) -> str:
     if s == {"morning", "afternoon"}:
         return "白天在"
     if s == {"afternoon", "evening"}:
-        return "下午来晚上也在"
+        return "下午在晚上也在"
     if s == {"morning", "afternoon", "evening"}:
-        return "全天都在"
+        return "全天在"
     if s == {"morning", "evening"}:
         return "上午和晚上在"
     return "值班中"
@@ -834,7 +882,7 @@ def parse_excel_schedule(
                 continue
 
             has_assignment = False
-            slot = parse_time_slot(row[time_col] if time_col < len(row) else None)
+            slots = parse_time_slots(row[time_col] if time_col < len(row) else None)
 
             for idx, person_name in person_cols:
                 if idx >= len(row):
@@ -881,12 +929,12 @@ def parse_excel_schedule(
                 if is_pre_sales_assignment(role_text):
                     pre_roster.add(person_name)
                     work_map = bucket["pre_work"]
-                    work_map.setdefault(person_name, set()).add(slot)
+                    work_map.setdefault(person_name, set()).update(slots)
 
                 if is_after_sales_assignment(role_text):
                     after_roster.add(person_name)
                     work_map = bucket["after_work"]
-                    work_map.setdefault(person_name, set()).add(slot)
+                    work_map.setdefault(person_name, set()).update(slots)
 
     rows_result = []
     for d, values in date_map.items():
